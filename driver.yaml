@@ -416,7 +416,6 @@ spec:
     - type: ConfigChange
   runPolicy: Serial
 ---
-
 kind: BuildConfig
 apiVersion: build.openshift.io/v1
 metadata:
@@ -433,18 +432,35 @@ spec:
   failedBuildsHistoryLimit: 1
   strategy:
     type: Docker
-    dockerStrategy:
-      from:
-        kind: ImageStreamTag
-        namespace: openshift
-        name: 'driver-toolkit:10.0.20251023-0'
+    # MODIFIED: The dockerStrategy no longer needs a 'from' as it's specified
+    # directly and correctly in the Dockerfile below.
+    dockerStrategy: {}
   postCommit: {}
   source:
     type: Dockerfile
     dockerfile: |-
-      FROM bla
-      RUN cat /etc/os-release && dnf repolist
+      # MODIFIED: Use a proper Red Hat UBI 10 base image.
+      FROM registry.access.redhat.com/ubi10/ubi:latest
 
+      # MODIFIED: Install the necessary toolchain for building RPMs from source.
+      # This includes rpm-build, git, gcc, and other utilities required by the kernel.sh script.
+      # Using --setopt=install_weak_deps=false helps keep the image size down.
+      RUN dnf install -y --setopt=install_weak_deps=false \
+          dnf-utils \
+          findutils \
+          gcc \
+          git \
+          jq \
+          make \
+          openssl \
+          rpm-build \
+          tar \
+          xz && \
+          dnf clean all
+
+      # MODIFIED: The rest of the build process remains the same.
+      # It will now execute inside a correctly configured UBI 10 environment.
+      RUN cat /etc/os-release && dnf repolist
       ADD kernel.sh /kernel.sh
       RUN chmod +x /kernel.sh; /kernel.sh
     configMaps:
