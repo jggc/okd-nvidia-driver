@@ -365,6 +365,9 @@ spec:
       # && dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
       RUN dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
 
+      RUN  env && ls -ltrh /tmp/
+
+
       USER builder
 
       WORKDIR /home/builder
@@ -372,10 +375,13 @@ spec:
 
       RUN export KVER=$(echo ${KERNEL_VERSION} | cut -d '-' -f 1) \
               KREL=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/\.el.*$//') \
-              KDIST=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/^.*\(\.el.\).*$/\1/') \
+              #KDIST=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/^.*\(\.el.\).*$/\1/') \
+              KDIST=$(echo ${KERNEL_VERSION} | sed -E 's/.*(el[0-9]+).*/\1/') \
               DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
           && if [ "${DRIVER_OPEN}" == "true" ] ; then export DRIVER_PATH="${DRIVER_PATH}-open" ; fi \
-          && git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} https://github.com/NVIDIA/yum-packaging-precompiled-kmod \
+          && env && find /usr/src/kernels && ls -ltrh /usr/src/kernels/ \
+          #&& git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} https://github.com/NVIDIA/yum-packaging-precompiled-kmod \
+          && git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} https://github.com/jggc/yum-packaging-precompiled-kmod \
           && cd yum-packaging-precompiled-kmod \
           && mkdir BUILD BUILDROOT RPMS SRPMS SOURCES SPECS \
           && mkdir nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH} \
@@ -450,7 +456,8 @@ spec:
       COPY --from=builder /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz
       COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
 
-      RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/NVIDIA/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
+      #RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/NVIDIA/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
+      RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/jggc/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
 
       # MODIFIED: Removed non-existent RHEL repositories from the disable command.
       RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
