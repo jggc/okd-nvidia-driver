@@ -25,6 +25,17 @@ spec:
   lookupPolicy:
     local: true
 ---
+# NEW: ImageStream for our reusable CentOS 10 build environment.
+kind: ImageStream
+apiVersion: image.openshift.io/v1
+metadata:
+  name: driver-toolkit-centos10
+  namespace: nvidia-gpu-operator
+spec:
+  lookupPolicy:
+    local: false
+---
+# --- ConfigMaps remain the same ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -51,9 +62,15 @@ data:
   kernel.sh: |-
     #!/bin/bash
 
-    dnf install -y jq dnf-plugins-core;
-    #This fails, lets try to skip it as it seems to be already enabled
+    set -ex
+
+    # Tools are now in the base image. The CRB repo is also in the base image.
+    # dnf install -y jq dnf-plugins-core;
+    # dnf config-manager --set-enabled crb;
+
+    # Enable CRB repo for build dependencies
     dnf config-manager --set-enabled crb;
+
     mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS};
     cd ~/rpmbuild/SOURCES;
 
@@ -74,7 +91,7 @@ data:
     # https://docs.gitlab.com/api/tags/
     # https://docs.gitlab.com/api/repositories/#get-file-archive
     #
-    # Kernel sources can be found in https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-9
+    # Kernel sources can be found in https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10
     # SRPM sources can be found in https://gitlab.com/redhat/centos-stream/rpms/kernel
     export KVer="$(uname -r)";
     kernel_source_commit=$(curl -L "https://gitlab.com/api/v4/projects/${CENTOS_REPO_ID}/repository/tags?search=${KVer%.x86_64}" 2>/dev/null | jq --raw-output -e '.[] | .target');
@@ -178,6 +195,89 @@ spec:
 kind: BuildConfig
 apiVersion: build.openshift.io/v1
 metadata:
+  name: driver-toolkit-centos10
+  namespace: nvidia-gpu-operator
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: 'driver-toolkit-centos10:latest'
+  resources: {}
+  successfulBuildsHistoryLimit: 2
+  failedBuildsHistoryLimit: 2
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: DockerImage
+        name: 'quay.io/centos/centos:stream10'
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM quay.io/centos/centos:stream10
+
+      RUN dnf config-manager --set-enabled crb;
+
+      # Install the necessary toolchain for building RPMs and kernel modules.
+      RUN dnf install -y --setopt=install_weak_deps=false \
+          dnf-utils \
+          findutils \
+          gcc \
+          git \
+          jq \
+          make \
+          openssl \
+          rpm-build \
+          tar \
+          xz && \
+          dnf clean all
+  triggers:
+    - type: ConfigChange
+  runPolicy: Serial
+---
+# MODIFIED: The 'kernel' BuildConfig now uses our new toolkit image.
+kind: BuildConfig
+apiVersion: build.openshift.io/v1
+metadata:
+  name: kernel
+  namespace: nvidia-gpu-operator
+spec:
+  nodeSelector: null
+  output:
+    to:
+      kind: ImageStreamTag
+      name: 'kernel:latest'
+  resources: {}
+  successfulBuildsHistoryLimit: 1
+  failedBuildsHistoryLimit: 1
+  strategy:
+    type: Docker
+    dockerStrategy:
+      # MODIFIED: Use the new centos10 toolkit as the base image.
+      from:
+        kind: ImageStreamTag
+        name: 'driver-toolkit-centos10:latest'
+  postCommit: {}
+  source:
+    type: Dockerfile
+    dockerfile: |-
+      # MODIFIED: The base image now contains all necessary build tools.
+      FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/driver-toolkit-centos10:latest
+
+      RUN cat /etc/os-release && dnf repolist
+      ADD kernel.sh /kernel.sh
+      # MODIFIED: The kernel.sh script will now run in an environment with all tools pre-installed.
+      RUN chmod +x /kernel.sh; /kernel.sh
+    configMaps:
+      - configMap:
+          name: kernel
+  triggers:
+    - type: ConfigChange
+  runPolicy: Serial
+---
+kind: BuildConfig
+apiVersion: build.openshift.io/v1
+metadata:
   name: driver-pb
   namespace: nvidia-gpu-operator
 spec:
@@ -194,7 +294,8 @@ spec:
     dockerStrategy:
       buildArgs:
         - name: DRIVER_TOOLKIT_IMAGE
-          value: 'image-registry.openshift-image-registry.svc:5000/openshift/driver-toolkit:10.0.20251023-0'
+          # MODIFIED: Point to the new CentOS 10 toolkit image.
+          value: 'image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/driver-toolkit-centos10:latest'
         - name: CUDA_DIST
           value: centos10
         - name: KERNEL_VERSION
@@ -226,7 +327,6 @@ spec:
     type: Git
     dockerfile: |
       # This dockerfile is adapted from https://github.com/NVIDIA/gpu-driver-container/blob/main/rhel10/precompiled/Dockerfile
-      # ... (comments remain the same)
 
       ARG DRIVER_TOOLKIT_IMAGE=''
       ARG CUDA_DIST=''
@@ -260,8 +360,10 @@ spec:
       RUN useradd -u 1001 -m -s /bin/bash builder
 
       COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-headers-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-devel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-devel-matched-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
-      RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 rhel-10-server-ose rt \
-          && dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
+      # MODIFIED: Removed non-existent RHEL repositories from the disable command.
+      # RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
+      # && dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
+      RUN dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
 
       USER builder
 
@@ -350,7 +452,8 @@ spec:
 
       RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/NVIDIA/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
 
-      RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 rhel-10-server-ose rt \
+      # MODIFIED: Removed non-existent RHEL repositories from the disable command.
+      RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
           && dnf install -y /tmp/kernel-*.rpm /rpms/kmod-nvidia-*.rpm && dnf clean all
 
       RUN    export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
@@ -400,60 +503,4 @@ spec:
     contextDir: /rhel10/precompiled
   triggers:
     - type: ConfigChange
-  runPolicy: Serial
----
-# MODIFIED: The 'kernel' BuildConfig's Dockerfile is updated below.
-kind: BuildConfig
-apiVersion: build.openshift.io/v1
-metadata:
-  name: kernel
-  namespace: nvidia-gpu-operator
-spec:
-  nodeSelector: null
-  output:
-    to:
-      kind: ImageStreamTag
-      name: 'kernel:latest'
-  resources: {}
-  successfulBuildsHistoryLimit: 1
-  failedBuildsHistoryLimit: 1
-  strategy:
-    type: Docker
-    dockerStrategy: {}
-  postCommit: {}
-  source:
-    type: Dockerfile
-    dockerfile: |-
-      # Use a proper Red Hat UBI 10 base image.
-      # FROM registry.access.redhat.com/ubi10/ubi:latest
-      #
-      # # MODIFIED: Add the CentOS Stream 10 CRB (CodeReady Builder) repository.
-      # # This repository is required for the build dependencies of the kernel,
-      # # which are fetched by the 'dnf builddep' command in kernel.sh.
-      # # The kernel.sh script will then enable this repo using 'dnf config-manager'.
-      # RUN dnf config-manager --add-repo https://mirror.stream.centos.org/10-stream/CRB/x86_64/os/
-
-      FROM quay.io/centos/centos:stream10
-
-      # Install the necessary toolchain for building RPMs from source.
-      RUN dnf install -y --setopt=install_weak_deps=false \
-          dnf-utils \
-          findutils \
-          gcc \
-          git \
-          jq \
-          make \
-          openssl \
-          rpm-build \
-          tar \
-          xz && \
-          dnf clean all
-
-      # The rest of the build process remains the same.
-      RUN cat /etc/os-release && dnf repolist
-      ADD kernel.sh /kernel.sh
-      RUN chmod +x /kernel.sh; /kernel.sh
-    configMaps:
-      - configMap:
-          name: kernel
   runPolicy: Serial
