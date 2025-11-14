@@ -52,6 +52,7 @@ data:
     #!/bin/bash
 
     dnf install -y jq dnf-plugins-core;
+    #This fails, lets try to skip it as it seems to be already enabled
     dnf config-manager --set-enabled crb;
     mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS};
     cd ~/rpmbuild/SOURCES;
@@ -116,7 +117,6 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      # MODIFIED: Updated to CUDA 13.0 to match the RHEL 10 repository.
       name: 'cuda:13.0-base-centos10'
   resources: {}
   successfulBuildsHistoryLimit: 2
@@ -124,8 +124,6 @@ spec:
   strategy:
     type: Docker
     dockerStrategy:
-      # MODIFIED: This 'from' is not used because the Dockerfile below specifies its own.
-      # It can be left as is, but the real change is in the Dockerfile source.
       from:
         kind: ImageStreamTag
         namespace: openshift
@@ -134,30 +132,23 @@ spec:
   source:
     type: Dockerfile
     dockerfile: |
-      # MODIFIED: Changed the base image from the problematic driver-toolkit to a clean UBI 10 image.
-      # This provides a correct RHEL 10 environment for the build.
       FROM registry.access.redhat.com/ubi10/ubi:latest
 
-      # MODIFIED: Set PKG_CMD to dnf, which is the standard for RHEL/CentOS 10.
       ENV PKG_CMD=dnf
 
       ENV NVARCH=x86_64
-      # MODIFIED: Updated requirements to CUDA 13.0 and driver 580+.
       ENV NVIDIA_REQUIRE_CUDA="cuda>=13.0 brand=unknown,driver>=580,driver<581"
 
       COPY cuda.repo-x86_64 /etc/yum.repos.d/cuda.repo
 
       LABEL maintainer="NVIDIA CORPORATION <sw-cuda-installer@nvidia.com>"
 
-      # MODIFIED: Updated GPG key checksum for RHEL 10.
       RUN NVIDIA_GPGKEY_SUM=afbea87d3b979b3788ef34223aeeb323ade481128e2c133723ae99b8a51368bb && \
           curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel10/${NVARCH}/CDF6BA43.pub | sed '/^Version/d' > /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA && \
           echo "$NVIDIA_GPGKEY_SUM  /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA" | sha256sum -c --strict -
 
-      # MODIFIED: Updated CUDA_VERSION to 13.0
       ENV CUDA_VERSION=13.0.2
 
-      # MODIFIED: Updated package names to match CUDA 13.0 versions available in the RHEL 10 repo.
       RUN ${PKG_CMD} install -y \
           cuda-cudart-13-0 \
           cuda-compat-13-0 \
@@ -194,7 +185,6 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      # MODIFIED: Updated driver version in tag to 580.
       name: 'driver:580-6.12.0-142.el10.x86_64-scos10'
   resources: {}
   successfulBuildsHistoryLimit: 2
@@ -219,7 +209,6 @@ spec:
           value: x86_64
         - name: TARGET_ARCH
           value: x86_64
-        # MODIFIED: Updated DRIVER_VERSION to a 580 series version available in the RHEL 10 repo.
         - name: DRIVER_VERSION
           value: 580.105.08
         - name: DRIVER_EPOCH
@@ -230,7 +219,6 @@ spec:
           value: jg@nationtech.io
         - name: DRIVER_STREAM_TYPE
           value: stable
-        # MODIFIED: Added CUDA_VERSION arg to be used in the Dockerfile.
         - name: CUDA_VERSION
           value: 13.0.2
   postCommit: {}
@@ -317,7 +305,6 @@ spec:
               --define "driver_branch ${DRIVER_STREAM}" \
               -v -bb SPECS/kmod-nvidia.spec
 
-      # MODIFIED: Updated the FROM line to pull the new CUDA 13.0 base image.
       FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/cuda:13.0-base-${CUDA_DIST}
 
       ARG BASE_URL='https://us.download.nvidia.com/tesla'
@@ -334,7 +321,6 @@ spec:
       ARG DRIVER_VERSION=''
       ENV DRIVER_VERSION=${DRIVER_VERSION}
 
-      # MODIFIED: Added CUDA_VERSION arg to be used for package installation.
       ARG CUDA_VERSION=''
       ENV CUDA_VERSION=${CUDA_VERSION}
 
@@ -416,6 +402,7 @@ spec:
     - type: ConfigChange
   runPolicy: Serial
 ---
+# MODIFIED: The 'kernel' BuildConfig's Dockerfile is updated below.
 kind: BuildConfig
 apiVersion: build.openshift.io/v1
 metadata:
@@ -432,19 +419,23 @@ spec:
   failedBuildsHistoryLimit: 1
   strategy:
     type: Docker
-    # MODIFIED: The dockerStrategy no longer needs a 'from' as it's specified
-    # directly and correctly in the Dockerfile below.
     dockerStrategy: {}
   postCommit: {}
   source:
     type: Dockerfile
     dockerfile: |-
-      # MODIFIED: Use a proper Red Hat UBI 10 base image.
-      FROM registry.access.redhat.com/ubi10/ubi:latest
+      # Use a proper Red Hat UBI 10 base image.
+      # FROM registry.access.redhat.com/ubi10/ubi:latest
+      #
+      # # MODIFIED: Add the CentOS Stream 10 CRB (CodeReady Builder) repository.
+      # # This repository is required for the build dependencies of the kernel,
+      # # which are fetched by the 'dnf builddep' command in kernel.sh.
+      # # The kernel.sh script will then enable this repo using 'dnf config-manager'.
+      # RUN dnf config-manager --add-repo https://mirror.stream.centos.org/10-stream/CRB/x86_64/os/
 
-      # MODIFIED: Install the necessary toolchain for building RPMs from source.
-      # This includes rpm-build, git, gcc, and other utilities required by the kernel.sh script.
-      # Using --setopt=install_weak_deps=false helps keep the image size down.
+      FROM quay.io/centos/centos:stream10
+
+      # Install the necessary toolchain for building RPMs from source.
       RUN dnf install -y --setopt=install_weak_deps=false \
           dnf-utils \
           findutils \
@@ -458,8 +449,7 @@ spec:
           xz && \
           dnf clean all
 
-      # MODIFIED: The rest of the build process remains the same.
-      # It will now execute inside a correctly configured UBI 10 environment.
+      # The rest of the build process remains the same.
       RUN cat /etc/os-release && dnf repolist
       ADD kernel.sh /kernel.sh
       RUN chmod +x /kernel.sh; /kernel.sh
