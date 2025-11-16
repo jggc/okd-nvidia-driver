@@ -119,6 +119,12 @@ data:
     cd ~/rpmbuild/ ;
     dnf builddep -y SPECS/kernel.spec;
     rpmbuild -bb --with baseonly --without pae --without debug --without zfcpdump --without arm64_64k --without realtime  --without realtime_arm64_64k --without cross_headers --without perf --without tools --without debuginfo --with kernel_abi_stablelists --without selftests --clean --target x86_64 SPECS/kernel.spec;
+    
+    # MODIFIED: The minimal kernel build does not package drm.ko.xz into the RPMs.
+    # We must rescue it from the BUILDROOT before it gets cleaned up so the final
+    # driver container can include it.
+    find ~/rpmbuild/BUILDROOT -name "drm.ko.xz" -exec cp {} ~/rpmbuild/RPMS/x86_64/ \;
+
     rm -rf ~/rpmbuild/BUILD;
     rm -rf ~/rpmbuild/BUILDROOT;
     rm -rf ~/rpmbuild/SOURCES;
@@ -143,8 +149,10 @@ spec:
     dockerStrategy:
       from:
         kind: ImageStreamTag
-        namespace: openshift
-        name: 'driver-toolkit:latest'
+        # namespace: openshift
+        namespace: nvidia-gpu-operator
+        # name: 'driver-toolkit:latest'
+        name: 'driver-toolkit-centos10:latest'
   postCommit: {}
   source:
     type: Dockerfile
@@ -229,6 +237,7 @@ spec:
           openssl \
           rpm-build \
           tar \
+          kmod \
           xz && \
           dnf clean all
   triggers:
@@ -294,7 +303,6 @@ spec:
     dockerStrategy:
       buildArgs:
         - name: DRIVER_TOOLKIT_IMAGE
-          # MODIFIED: Point to the new CentOS 10 toolkit image.
           value: 'image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/driver-toolkit-centos10:latest'
         - name: CUDA_DIST
           value: centos10
@@ -335,6 +343,8 @@ spec:
 
       RUN cat /etc/os-release && dnf repolist
 
+      RUN find /root/rpmbuild/RPMS && ls -ltrh /root/rpmbuild && env && sleep 10
+
       FROM ${DRIVER_TOOLKIT_IMAGE} as builder
 
       RUN cat /etc/os-release && dnf repolist
@@ -359,14 +369,9 @@ spec:
 
       RUN useradd -u 1001 -m -s /bin/bash builder
 
+
       COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-headers-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-devel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-devel-matched-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
-      # MODIFIED: Removed non-existent RHEL repositories from the disable command.
-      # RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
-      # && dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
       RUN dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
-
-      RUN  env && ls -ltrh /tmp/
-
 
       USER builder
 
@@ -376,11 +381,9 @@ spec:
       RUN export KVER=$(echo ${KERNEL_VERSION} | cut -d '-' -f 1) \
               KREL=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/\.el.*$//') \
               #KDIST=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/^.*\(\.el.\).*$/\1/') \
-              KDIST=$(echo ${KERNEL_VERSION} | sed -E 's/.*(el[0-9]+).*/\1/') \
+              KDIST=$(echo ${KERNEL_VERSION} | sed -E 's/.*(\.el[0-9]+).*/\1/') \
               DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
           && if [ "${DRIVER_OPEN}" == "true" ] ; then export DRIVER_PATH="${DRIVER_PATH}-open" ; fi \
-          && env && find /usr/src/kernels && ls -ltrh /usr/src/kernels/ \
-          #&& git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} https://github.com/NVIDIA/yum-packaging-precompiled-kmod \
           && git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} https://github.com/jggc/yum-packaging-precompiled-kmod \
           && cd yum-packaging-precompiled-kmod \
           && mkdir BUILD BUILDROOT RPMS SRPMS SOURCES SPECS \
@@ -414,6 +417,8 @@ spec:
               -v -bb SPECS/kmod-nvidia.spec
 
       FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/cuda:13.0-base-${CUDA_DIST}
+
+      RUN cat /etc/os-release && dnf repolist && ls -lh /usr/sbin/
 
       ARG BASE_URL='https://us.download.nvidia.com/tesla'
 
@@ -453,15 +458,19 @@ spec:
           && touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.builtin \
           && depmod ${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}
 
-      COPY --from=builder /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz
+      # MODIFIED: Copy drm.ko.xz directly from the 'kernel' stage where we saved it,
+      # not from the 'builder' stage where it doesn't exist.
+      # RUN mkdir -p /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/
+      #
+      # JG: it looks like drm.ko is now built into the kernel and not a separate module anymore
+      # COPY --from=kernel /root/rpmbuild/RPMS/x86_64/drm.ko.xz /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz
       COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
 
-      #RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/NVIDIA/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
       RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/jggc/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
 
-      # MODIFIED: Removed non-existent RHEL repositories from the disable command.
-      RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
-          && dnf install -y /tmp/kernel-*.rpm /rpms/kmod-nvidia-*.rpm && dnf clean all
+      # These repos are not activated in the centos10 image we're using
+      # RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
+      #    && dnf install -y /tmp/kernel-*.rpm /rpms/kmod-nvidia-*.rpm && dnf clean all
 
       RUN    export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
           && if [ "${DRIVER_STREAM_TYPE}" == "development" ] ; then \
