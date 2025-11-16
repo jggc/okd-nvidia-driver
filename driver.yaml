@@ -64,10 +64,6 @@ data:
 
     set -ex
 
-    # Tools are now in the base image. The CRB repo is also in the base image.
-    # dnf install -y jq dnf-plugins-core;
-    # dnf config-manager --set-enabled crb;
-
     # Enable CRB repo for build dependencies
     dnf config-manager --set-enabled crb;
 
@@ -120,10 +116,9 @@ data:
     dnf builddep -y SPECS/kernel.spec;
     rpmbuild -bb --with baseonly --without pae --without debug --without zfcpdump --without arm64_64k --without realtime  --without realtime_arm64_64k --without cross_headers --without perf --without tools --without debuginfo --with kernel_abi_stablelists --without selftests --clean --target x86_64 SPECS/kernel.spec;
     
-    # MODIFIED: The minimal kernel build does not package drm.ko.xz into the RPMs.
-    # We must rescue it from the BUILDROOT before it gets cleaned up so the final
-    # driver container can include it.
-    find ~/rpmbuild/BUILDROOT -name "drm.ko.xz" -exec cp {} ~/rpmbuild/RPMS/x86_64/ \;
+    # NOTE: Your observation was correct. The drm.ko.xz is now built into the SCOS10/RHEL10 kernel.
+    # The find command below will find nothing, which is expected. We leave it commented out.
+    # find ~/rpmbuild/BUILDROOT -name "drm.ko.xz" -exec cp {} ~/rpmbuild/RPMS/x86_64/ \;
 
     rm -rf ~/rpmbuild/BUILD;
     rm -rf ~/rpmbuild/BUILDROOT;
@@ -149,9 +144,7 @@ spec:
     dockerStrategy:
       from:
         kind: ImageStreamTag
-        # namespace: openshift
         namespace: nvidia-gpu-operator
-        # name: 'driver-toolkit:latest'
         name: 'driver-toolkit-centos10:latest'
   postCommit: {}
   source:
@@ -380,7 +373,6 @@ spec:
 
       RUN export KVER=$(echo ${KERNEL_VERSION} | cut -d '-' -f 1) \
               KREL=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/\.el.*$//') \
-              #KDIST=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/^.*\(\.el.\).*$/\1/') \
               KDIST=$(echo ${KERNEL_VERSION} | sed -E 's/.*(\.el[0-9]+).*/\1/') \
               DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
           && if [ "${DRIVER_OPEN}" == "true" ] ; then export DRIVER_PATH="${DRIVER_PATH}-open" ; fi \
@@ -458,20 +450,17 @@ spec:
           && touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.builtin \
           && depmod ${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}
 
-      # MODIFIED: Copy drm.ko.xz directly from the 'kernel' stage where we saved it,
-      # not from the 'builder' stage where it doesn't exist.
-      # RUN mkdir -p /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/
-      #
       # JG: it looks like drm.ko is now built into the kernel and not a separate module anymore
+      # Your analysis here is correct. We no longer need to copy this file.
       # COPY --from=kernel /root/rpmbuild/RPMS/x86_64/drm.ko.xz /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz
+      
       COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
 
       RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/jggc/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
 
-      # These repos are not activated in the centos10 image we're using
-      # RUN dnf config-manager --disable centos-ceph-quincy centos-nfv-openvswitch centos-openstack-zed centos-rabbitmq-38 \
-      #    && dnf install -y /tmp/kernel-*.rpm /rpms/kmod-nvidia-*.rpm && dnf clean all
-
+      # MODIFIED: This is the primary fix for your build error.
+      # REASON: The NVIDIA CUDA repo for RHEL10 does not use DNF modules. We must remove the `dnf module enable`
+      # commands and install the driver packages directly by name.
       RUN    export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
           && if [ "${DRIVER_STREAM_TYPE}" == "development" ] ; then \
               curl -sLOf ${BASE_URL}/${DRIVER_VERSION}/NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run \
@@ -484,9 +473,7 @@ spec:
               && rm NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run ; \
           else \
               CUDA_VERSION_ARRAY=(${CUDA_VERSION//./ }) && CUDA_DASHED_VERSION=${CUDA_VERSION_ARRAY[0]}-${CUDA_VERSION_ARRAY[1]} \
-              && echo rm /etc/rhsm-host REMOVED \
-              && echo /usr/local/bin/rhsm-register REMOVED \
-              && dnf -y module enable nvidia-driver:${DRIVER_STREAM}/default \
+              && echo "INFO: Installing user-space driver components directly without DNF modules." \
               && dnf install -y \
                   nvidia-driver-cuda-${DRIVER_VERSION} \
                   nvidia-driver-libs-${DRIVER_VERSION} \
@@ -496,8 +483,8 @@ spec:
               && if [ "$DRIVER_TYPE" != "vgpu" ] && [ "$TARGETARCH" != "arm64" ]; then \
                   versionArray=(${DRIVER_VERSION//./ }); \
                   DRIVER_BRANCH=${versionArray[0]}; \
-                  dnf module enable -y nvidia-driver:${DRIVER_BRANCH} && \
-                  dnf install -y nvidia-fabric-manager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_BRANCH}-${DRIVER_VERSION} ; \
+                  echo "INFO: Installing Fabric Manager components directly without DNF modules." \
+                  && dnf install -y nvidia-fabric-manager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_BRANCH}-${DRIVER_VERSION} ; \
               fi \
               && dnf clean all; \
           fi
