@@ -344,7 +344,7 @@ spec:
   output:
     to:
       kind: ImageStreamTag
-      name: 'driver:580-6.12.0-142.el10.x86_64-scos10'
+      name: 'driver:580-6.12.0-142.el10.x86_64-centos10'
   resources: {}
   successfulBuildsHistoryLimit: 2
   failedBuildsHistoryLimit: 2
