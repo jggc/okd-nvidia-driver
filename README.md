@@ -26,6 +26,8 @@ oc -n nvidia-gpu-operator start-build driver-pb
 ```
 
 In order to deploy this driver container the following Helm Parameters are used:
+
+**rhel9 based clusters**
 ```yaml
   - chart: gpu-operator
     repoURL: https://helm.ngc.nvidia.com/nvidia
@@ -53,6 +55,35 @@ In order to deploy this driver container the following Helm Parameters are used:
           value: "true"
 ```
 Copied out of my ArgoCD application manifest managing the operator.
+
+**rhel10 based**
+```yaml
+  - chart: gpu-operator
+    repoURL: https://helm.ngc.nvidia.com/nvidia
+    targetRevision: v25.3.0
+    helm:
+      releaseName: gpu-operator
+      parameters:
+        - name: "nfd.enabled"
+          value: "false"
+        - name: "enable_selinux"
+          value: "true"
+        - name: "platform.openshift"
+          value: "true"
+        - name: "operator.use_ocp_driver_toolkit"
+          value: "true"
+        - name: "driver.repository"
+          value: "image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator"
+        - name: "driver.imagePullPolicy"
+          value: "Always"
+        - name: "driver.usePrecompiled"
+          value: "true"
+        - name: "driver.version"
+          value: "580"
+        - name: "dcgmExporter.serviceMonitor.enabled"
+          value: "false"
+```
+
 
 # Known problems
 Depending on your setup it might be necessary to manually load the `video` kernel
