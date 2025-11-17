@@ -55,6 +55,67 @@ immutable: false
 kind: ConfigMap
 apiVersion: v1
 metadata:
+  name: dummy-egl
+  namespace: nvidia-gpu-operator
+immutable: false
+data:
+  dummy-egl.sh: |-
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "Building and installing dummy egl package to work around this issue : https://github.com/NVIDIA/yum-packaging-nvidia-driver/issues/12"
+    echo "[*] Installing required build tools..."
+    dnf install -y rpm-build rpmdevtools
+
+    echo listing /root
+    ls /root
+
+    echo "listing ~"
+    ls ~
+
+    echo "[*] Setting up rpmbuild tree..."
+    rpmdev-setuptree
+
+    echo current dir && pwd && echo "going to ~" && cd ~ && echo "pwd ~" && pwd && cd - && echo came back && pwd
+
+    SPECFILE="/root/rpmbuild/SPECS/dummy-egl.spec"
+
+    echo "[*] Writing spec file to $SPECFILE..."
+    cat > "$SPECFILE" <<'EOF'
+    Name: dummy-egl
+    Version: 1
+    Release: 1
+    Summary: Dummy EGL package for dependency workaround
+    License: Public Domain
+    BuildArch: x86_64
+    Provides: egl-gbm = 9999, egl-wayland = 9999, egl-x11 = 9999
+    Provides: egl-gbm(x86-64) = 9999, egl-wayland(x86-64) = 9999, egl-x11(x86-64) = 9999
+
+    %description
+    This dummy package exists only to satisfy dependency requirements
+    for NVIDIA driver libraries on RHEL/CentOS 10 systems, where
+    EGL components have been removed.
+
+    %files
+    %defattr(-,root,root,-)
+    EOF
+
+    echo "[*] Building dummy EGL RPM..."
+    rpmbuild -bb "$SPECFILE"
+
+    RPM_OUT="/root/rpmbuild/RPMS/x86_64/dummy-egl-1-1.x86_64.rpm"
+
+    echo "[*] Installing built RPM: $RPM_OUT"
+    rpm -ivh "$RPM_OUT"
+
+    echo "[✓] Dummy EGL package installed successfully."
+    echo "[i] Provides:"
+    rpm -qp --provides "$RPM_OUT"
+    dnf clean all
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
   name: kernel
   namespace: nvidia-gpu-operator
 immutable: false
@@ -116,10 +177,6 @@ data:
     dnf builddep -y SPECS/kernel.spec;
     rpmbuild -bb --with baseonly --without pae --without debug --without zfcpdump --without arm64_64k --without realtime  --without realtime_arm64_64k --without cross_headers --without perf --without tools --without debuginfo --with kernel_abi_stablelists --without selftests --clean --target x86_64 SPECS/kernel.spec;
     
-    # NOTE: Your observation was correct. The drm.ko.xz is now built into the SCOS10/RHEL10 kernel.
-    # The find command below will find nothing, which is expected. We leave it commented out.
-    # find ~/rpmbuild/BUILDROOT -name "drm.ko.xz" -exec cp {} ~/rpmbuild/RPMS/x86_64/ \;
-
     rm -rf ~/rpmbuild/BUILD;
     rm -rf ~/rpmbuild/BUILDROOT;
     rm -rf ~/rpmbuild/SOURCES;
@@ -439,6 +496,11 @@ spec:
 
       USER root
 
+      # Install dummy egl package to workaround bug in cuda repo for package nvidia-driver-libs where egl libraries are required but no longer exist in rhel10 based systems https://github.com/NVIDIA/yum-packaging-nvidia-driver/issues/12
+      ADD dummy-egl.sh /root/dummy-egl.sh
+      RUN chmod +x /root/dummy-egl.sh && /root/dummy-egl.sh
+
+
       COPY --chmod=744 nvidia-driver /usr/local/bin
       COPY --chmod=744 common.sh /usr/local/bin
       COPY --from=builder /home/builder/yum-packaging-precompiled-kmod/RPMS/${TARGET_ARCH}/*.rpm /rpms/
@@ -450,17 +512,11 @@ spec:
           && touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.builtin \
           && depmod ${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}
 
-      # JG: it looks like drm.ko is now built into the kernel and not a separate module anymore
-      # Your analysis here is correct. We no longer need to copy this file.
-      # COPY --from=kernel /root/rpmbuild/RPMS/x86_64/drm.ko.xz /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/kernel/drivers/gpu/drm/drm.ko.xz
-      
       COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
 
       RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/jggc/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
 
-      # MODIFIED: This is the primary fix for your build error.
-      # REASON: The NVIDIA CUDA repo for RHEL10 does not use DNF modules. We must remove the `dnf module enable`
-      # commands and install the driver packages directly by name.
+
       RUN    export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
           && if [ "${DRIVER_STREAM_TYPE}" == "development" ] ; then \
               curl -sLOf ${BASE_URL}/${DRIVER_VERSION}/NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run \
@@ -473,18 +529,22 @@ spec:
               && rm NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run ; \
           else \
               CUDA_VERSION_ARRAY=(${CUDA_VERSION//./ }) && CUDA_DASHED_VERSION=${CUDA_VERSION_ARRAY[0]}-${CUDA_VERSION_ARRAY[1]} \
-              && echo "INFO: Installing user-space driver components directly without DNF modules." \
+              && echo "INFO: Installing local kmod, system graphics libs, and user-space driver components." \
               && dnf install -y \
+                  /rpms/kmod-nvidia-*.rpm \
+                  mesa-libEGL \
+                  mesa-libgbm \
+                  libwayland-egl \
+                  egl-utils \
                   nvidia-driver-cuda-${DRIVER_VERSION} \
                   nvidia-driver-libs-${DRIVER_VERSION} \
-                  cuda-compat-${CUDA_DASHED_VERSION} \
-                  cuda-cudart-${CUDA_DASHED_VERSION} \
                   nvidia-persistenced-${DRIVER_VERSION} \
               && if [ "$DRIVER_TYPE" != "vgpu" ] && [ "$TARGETARCH" != "arm64" ]; then \
                   versionArray=(${DRIVER_VERSION//./ }); \
                   DRIVER_BRANCH=${versionArray[0]}; \
-                  echo "INFO: Installing Fabric Manager components directly without DNF modules." \
-                  && dnf install -y nvidia-fabric-manager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_BRANCH}-${DRIVER_VERSION} ; \
+                  echo "INFO: Installing Fabric Manager components." \
+                  && echo "dnf install -y nvidia-fabricmanager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_BRANCH}-${DRIVER_VERSION} ;" \
+                  && dnf install -y nvidia-fabricmanager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_VERSION} ; \
               fi \
               && dnf clean all; \
           fi
@@ -501,6 +561,9 @@ spec:
       RUN rm -f /etc/yum.repos.d/cuda.repo
       RUN ls /opt/lib/firmware/nvidia/ && ls /opt/lib/firmware/nvidia/${DRIVER_VERSION}/
       ENTRYPOINT ["nvidia-driver", "init"]
+    configMaps:
+      - configMap:
+          name: dummy-egl
     git:
       uri: 'https://github.com/jggc/gpu-driver-container.git'
     contextDir: /rhel10/precompiled
