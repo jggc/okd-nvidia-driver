@@ -222,7 +222,7 @@ spec:
           curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel10/${NVARCH}/CDF6BA43.pub | sed '/^Version/d' > /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA && \
           echo "$NVIDIA_GPGKEY_SUM  /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA" | sha256sum -c --strict -
 
-      ENV CUDA_VERSION=13.0.2
+      ENV CUDA_VERSION=13.0.1
 
       RUN ${PKG_CMD} install -y \
           cuda-cudart-13-0 \
@@ -380,7 +380,7 @@ spec:
         - name: DRIVER_STREAM_TYPE
           value: stable
         - name: CUDA_VERSION
-          value: 13.0.2
+          value: 13.0.1
   postCommit: {}
   source:
     type: Git
@@ -394,7 +394,7 @@ spec:
 
       RUN cat /etc/os-release && dnf repolist
 
-      RUN find /root/rpmbuild/RPMS && ls -ltrh /root/rpmbuild && env && sleep 10
+      RUN find /root/rpmbuild/RPMS && ls -ltrh /root/rpmbuild && env
 
       FROM ${DRIVER_TOOLKIT_IMAGE} as builder
 
@@ -411,7 +411,7 @@ spec:
 
       ARG DRIVER_VERSION=''
       ARG DRIVER_EPOCH=''
-      ARG DRIVER_OPEN='false'
+      ARG DRIVER_OPEN='true'
       ARG DRIVER_PATH='kernel'
 
       ARG BUILDER_USER=''
@@ -421,7 +421,12 @@ spec:
       RUN useradd -u 1001 -m -s /bin/bash builder
 
 
-      COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-headers-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-devel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-devel-matched-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
+      COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-headers-${KERNEL_VERSION}.rpm\
+        /root/rpmbuild/RPMS/x86_64/kernel-devel-${KERNEL_VERSION}.rpm \
+        /root/rpmbuild/RPMS/x86_64/kernel-devel-matched-${KERNEL_VERSION}.rpm \
+        /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm \
+        /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm \
+        /tmp/
       RUN dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
 
       USER builder
