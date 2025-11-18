@@ -277,7 +277,8 @@ spec:
       RUN dnf config-manager --set-enabled crb;
 
       # Install the necessary toolchain for building RPMs and kernel modules.
-      RUN dnf install -y --setopt=install_weak_deps=false \
+      RUN KERNEL_VERSION=$(uname -r) && dnf install -y --setopt=install_weak_deps=false \
+          "kernel-headers-${KERNEL_VERSION}" \
           dnf-utils \
           findutils \
           gcc \
