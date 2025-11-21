@@ -25,7 +25,6 @@ spec:
   lookupPolicy:
     local: true
 ---
-# NEW: ImageStream for our reusable CentOS 10 build environment.
 kind: ImageStream
 apiVersion: image.openshift.io/v1
 metadata:
@@ -35,7 +34,6 @@ spec:
   lookupPolicy:
     local: false
 ---
-# --- ConfigMaps remain the same ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -67,18 +65,10 @@ data:
     echo "[*] Installing required build tools..."
     dnf install -y rpm-build rpmdevtools
 
-    echo listing /root
-    ls /root
-
-    echo "listing ~"
-    ls ~
-
     echo "[*] Setting up rpmbuild tree..."
     rpmdev-setuptree
 
-    echo current dir && pwd && echo "going to ~" && cd ~ && echo "pwd ~" && pwd && cd - && echo came back && pwd
-
-    SPECFILE="/root/rpmbuild/SPECS/dummy-egl.spec"
+    SPECFILE="$HOME/rpmbuild/SPECS/dummy-egl.spec"
 
     echo "[*] Writing spec file to $SPECFILE..."
     cat > "$SPECFILE" <<'EOF'
@@ -103,14 +93,12 @@ data:
     echo "[*] Building dummy EGL RPM..."
     rpmbuild -bb "$SPECFILE"
 
-    RPM_OUT="/root/rpmbuild/RPMS/x86_64/dummy-egl-1-1.x86_64.rpm"
+    RPM_OUT="$HOME/rpmbuild/RPMS/x86_64/dummy-egl-1-1.x86_64.rpm"
 
     echo "[*] Installing built RPM: $RPM_OUT"
     rpm -ivh "$RPM_OUT"
 
     echo "[✓] Dummy EGL package installed successfully."
-    echo "[i] Provides:"
-    rpm -qp --provides "$RPM_OUT"
     dnf clean all
 ---
 kind: ConfigMap
@@ -122,133 +110,90 @@ immutable: false
 data:
   kernel.sh: |-
     #!/bin/bash
-
     set -ex
 
     # Enable CRB repo for build dependencies
-    dnf config-manager --set-enabled crb;
+    dnf config-manager --set-enabled crb
 
-    mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS};
-    cd ~/rpmbuild/SOURCES;
+    mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+    cd ~/rpmbuild/SOURCES
 
-    CENTOS_STREAM_9_REPO_ID="24152864"
-    CENTOS_STREAM_9_RPM_BRANCH_NAME="c9s"
+    CENTOS_REPO_ID="56169485"
+    RPM_BRANCH_NAME="c10s"
 
-    CENTOS_STREAM_10_REPO_ID="56169485"
-    CENTOS_STREAM_10_RPM_BRANCH_NAME="c10s"
-
-    CENTOS_REPO_ID="${CENTOS_STREAM_10_REPO_ID}"
-    RPM_BRANCH_NAME="${CENTOS_STREAM_10_RPM_BRANCH_NAME}"
-    # We search kernel sources by tag name and download its tarball. And we search
-    # the 500 most recent commits in order to find our kernel versions source rpm files.
-    # For Gitlab API documentation see:
-    #
-    # https://docs.gitlab.com/api/commits/
-    # https://docs.gitlab.com/api/rest/#pagination
-    # https://docs.gitlab.com/api/tags/
-    # https://docs.gitlab.com/api/repositories/#get-file-archive
-    #
-    # Kernel sources can be found in https://gitlab.com/redhat/centos-stream/src/kernel/centos-stream-10
-    # SRPM sources can be found in https://gitlab.com/redhat/centos-stream/rpms/kernel
-    export KVer="$(uname -r)";
-    kernel_source_commit=$(curl -L "https://gitlab.com/api/v4/projects/${CENTOS_REPO_ID}/repository/tags?search=${KVer%.x86_64}" 2>/dev/null | jq --raw-output -e '.[] | .target');
-    echo "kernel_source_commit ${kernel_source_commit}"
-    # We need to repack the archive as the foldername does not match our expectations...
-    curl -L "http://gitlab.com/api/v4/projects/${CENTOS_REPO_ID}/repository/archive.tar.gz?sha=${kernel_source_commit}" 2>/dev/null | tar xzf -; mv centos* linux-${KVer%.x86_64}; tar -cf - linux-${KVer%.x86_64}/ | xz -0 -T0 - > linux-${KVer%.x86_64}.tar.xz;
-
-    for p in {1..5}; do
-      rpm_source_commit=$(curl -L "https://gitlab.com/api/v4/projects/23664863/repository/commits?ref_name=${RPM_BRANCH_NAME}&path%2Fkernel%2Fkernel.spec&per_page=100&page=${p}" 2>/dev/null | jq --raw-output -e '.[] | select(.title=="kernel-'${KVer%.x86_64}'") | .id') ;
-      if [ $? -eq 0 ]; then
-        unset KVer;
-        # As we found our commit we can fetch it, in order to only fetch what we need
-        # we do it by hand as described in
-        # https://thelinuxcode.com/clone-git-repository-with-specific-revisions-changeset/;
-        git init .;
-        git remote add origin https://gitlab.com/redhat/centos-stream/rpms/kernel.git;
-        git fetch --depth 1 origin ${rpm_source_commit};
-        git checkout ${rpm_source_commit};
-        mv kernel.spec ../SPECS/;
-        unset rpm_source_commit;
-        unset kernel_source_commit;
-        break;
-      fi;
-    done;
-    cd ~/rpmbuild/ ;
-    dnf builddep -y SPECS/kernel.spec;
-    rpmbuild -bb --with baseonly --without pae --without debug --without zfcpdump --without arm64_64k --without realtime  --without realtime_arm64_64k --without cross_headers --without perf --without tools --without debuginfo --with kernel_abi_stablelists --without selftests --clean --target x86_64 SPECS/kernel.spec;
+    # Get current kernel version
+    export KVer="$(uname -r)"
     
-    rm -rf ~/rpmbuild/BUILD;
-    rm -rf ~/rpmbuild/BUILDROOT;
-    rm -rf ~/rpmbuild/SOURCES;
-    dnf clean all;
----
-kind: BuildConfig
-apiVersion: build.openshift.io/v1
-metadata:
-  name: cuda
-  namespace: nvidia-gpu-operator
-spec:
-  nodeSelector: null
-  output:
-    to:
-      kind: ImageStreamTag
-      name: 'cuda:13.0-base-centos10'
-  resources: {}
-  successfulBuildsHistoryLimit: 2
-  failedBuildsHistoryLimit: 2
-  strategy:
-    type: Docker
-    dockerStrategy:
-      from:
-        kind: ImageStreamTag
-        namespace: nvidia-gpu-operator
-        name: 'driver-toolkit-centos10:latest'
-  postCommit: {}
-  source:
-    type: Dockerfile
-    dockerfile: |
-      FROM registry.access.redhat.com/ubi10/ubi:latest
+    echo "Building kernel packages for version: ${KVer}"
 
-      ENV PKG_CMD=dnf
+    # Fetch kernel source from GitLab by tag
+    kernel_source_commit=$(curl -L "https://gitlab.com/api/v4/projects/${CENTOS_REPO_ID}/repository/tags?search=${KVer%.x86_64}" 2>/dev/null | jq --raw-output -e '.[] | .target')
+    echo "Kernel source commit: ${kernel_source_commit}"
+    
+    # Download and repack kernel source
+    curl -L "http://gitlab.com/api/v4/projects/${CENTOS_REPO_ID}/repository/archive.tar.gz?sha=${kernel_source_commit}" 2>/dev/null | tar xzf -
+    mv centos* linux-${KVer%.x86_64}
+    tar -cf - linux-${KVer%.x86_64}/ | xz -0 -T0 - > linux-${KVer%.x86_64}.tar.xz
 
-      ENV NVARCH=x86_64
-      ENV NVIDIA_REQUIRE_CUDA="cuda>=13.0 brand=unknown,driver>=580,driver<581"
+    # Fetch kernel spec file from RPM repository
+    for p in {1..10}; do
+      URL="https://gitlab.com/api/v4/projects/23664863/repository/commits?ref_name=${RPM_BRANCH_NAME}&path=kernel.spec&per_page=50&page=${p}"
 
-      COPY cuda.repo-x86_64 /etc/yum.repos.d/cuda.repo
+      echo "attempt ${p}, fetching url : ${URL}"
 
-      LABEL maintainer="NVIDIA CORPORATION <sw-cuda-installer@nvidia.com>"
+      CURL_OUTPUT=$(curl -L "${URL}" 2>/dev/null)
 
-      RUN NVIDIA_GPGKEY_SUM=afbea87d3b979b3788ef34223aeeb323ade481128e2c133723ae99b8a51368bb && \
-          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel10/${NVARCH}/CDF6BA43.pub | sed '/^Version/d' > /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA && \
-          echo "$NVIDIA_GPGKEY_SUM  /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA" | sha256sum -c --strict -
+      echo "Got output titles"
+      # echo $CURL_OUTPUT | jq -e '.[] | .title'
 
-      ENV CUDA_VERSION=13.0.1
+      KERNEL_TITLE="kernel-${KVer%.x86_64}"
 
-      RUN ${PKG_CMD} install -y \
-          cuda-cudart-13-0 \
-          cuda-compat-13-0 \
-          && ${PKG_CMD} clean all \
-          && rm -rf /var/cache/yum/*
+      echo "LOOKING FOR ${KERNEL_TITLE}"
 
-      # nvidia-docker 1.0
-      RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/nvidia.conf
+      rpm_source_commit=$(echo "${CURL_OUTPUT}" | jq --raw-output -e '.[] | select(.title=="'${KERNEL_TITLE}'") | .id')
 
-      ENV PATH=/usr/local/cuda/bin:${PATH}
-      ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+      echo "Got rpm_source_commit : ${rpm_source_commit}"
 
-      ADD https://gitlab.com/nvidia/container-images/cuda/-/raw/master/NGC-DL-CONTAINER-LICENSE /NGC-DL-CONTAINER-LICENSE
+      if [[ -n "${rpm_source_commit}" ]]; then
+        echo "Found rpm source commit, cloning repo at this exact commit"
+        git init .
+        git remote add origin https://gitlab.com/redhat/centos-stream/rpms/kernel.git
+        git fetch --depth 1 origin ${rpm_source_commit}
+        git checkout ${rpm_source_commit}
+        mv kernel.spec ../SPECS/
+        break
+      fi
+    done
 
-      # nvidia-container-runtime
-      ENV NVIDIA_VISIBLE_DEVICES=all
-      ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    configMaps:
-      - configMap:
-          name: cuda-repo
-        destinationDir: .
-  triggers:
-    - type: ConfigChange
-    - type: ImageChange
-  runPolicy: Serial
+    cd ~/rpmbuild/
+
+    # Install build dependencies
+    dnf builddep -y SPECS/kernel.spec
+
+    # Build kernel RPMs
+    rpmbuild -bb \
+      --with baseonly \
+      --without pae \
+      --without debug \
+      --without zfcpdump \
+      --without arm64_64k \
+      --without realtime \
+      --without realtime_arm64_64k \
+      --without cross_headers \
+      --without perf \
+      --without tools \
+      --without debuginfo \
+      --with kernel_abi_stablelists \
+      --without selftests \
+      --clean \
+      --target x86_64 \
+      SPECS/kernel.spec
+
+    # Cleanup to reduce image size
+    rm -rf ~/rpmbuild/BUILD
+    rm -rf ~/rpmbuild/BUILDROOT
+    rm -rf ~/rpmbuild/SOURCES
+    dnf clean all
 ---
 kind: BuildConfig
 apiVersion: build.openshift.io/v1
@@ -274,11 +219,11 @@ spec:
     dockerfile: |
       FROM quay.io/centos/centos:stream10
 
-      RUN dnf config-manager --set-enabled crb;
+      # Enable CRB repository
+      RUN dnf config-manager --set-enabled crb
 
-      # Install the necessary toolchain for building RPMs and kernel modules.
-      RUN KERNEL_VERSION=$(uname -r) && dnf install -y --setopt=install_weak_deps=false \
-          "kernel-headers-${KERNEL_VERSION}" \
+      # Install build toolchain
+      RUN dnf install -y --setopt=install_weak_deps=false \
           dnf-utils \
           findutils \
           gcc \
@@ -287,15 +232,16 @@ spec:
           make \
           openssl \
           rpm-build \
+          rpmdevtools \
           tar \
           kmod \
-          xz && \
-          dnf clean all
+          xz \
+          elfutils-libelf-devel \
+          && dnf clean all
   triggers:
     - type: ConfigChange
   runPolicy: Serial
 ---
-# MODIFIED: The 'kernel' BuildConfig now uses our new toolkit image.
 kind: BuildConfig
 apiVersion: build.openshift.io/v1
 metadata:
@@ -313,7 +259,6 @@ spec:
   strategy:
     type: Docker
     dockerStrategy:
-      # MODIFIED: Use the new centos10 toolkit as the base image.
       from:
         kind: ImageStreamTag
         name: 'driver-toolkit-centos10:latest'
@@ -321,16 +266,77 @@ spec:
   source:
     type: Dockerfile
     dockerfile: |-
-      # MODIFIED: The base image now contains all necessary build tools.
       FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/driver-toolkit-centos10:latest
 
-      RUN cat /etc/os-release && dnf repolist
       ADD kernel.sh /kernel.sh
-      # MODIFIED: The kernel.sh script will now run in an environment with all tools pre-installed.
-      RUN chmod +x /kernel.sh; /kernel.sh
+      RUN chmod +x /kernel.sh && /kernel.sh
     configMaps:
       - configMap:
           name: kernel
+  triggers:
+    - type: ConfigChange
+    - type: ImageChange
+  runPolicy: Serial
+---
+kind: BuildConfig
+apiVersion: build.openshift.io/v1
+metadata:
+  name: cuda
+  namespace: nvidia-gpu-operator
+spec:
+  nodeSelector: null
+  output:
+    to:
+      kind: ImageStreamTag
+      name: 'cuda:13.0-base-centos10'
+  resources: {}
+  successfulBuildsHistoryLimit: 2
+  failedBuildsHistoryLimit: 2
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: ImageStreamTag
+        name: 'driver-toolkit-centos10:latest'
+  postCommit: {}
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/driver-toolkit-centos10:latest
+
+      ENV PKG_CMD=dnf
+      ENV NVARCH=x86_64
+      ENV NVIDIA_REQUIRE_CUDA="cuda>=13.0 brand=unknown,driver>=580,driver<581"
+
+      COPY cuda.repo-x86_64 /etc/yum.repos.d/cuda.repo
+
+      LABEL maintainer="NVIDIA CORPORATION <sw-cuda-installer@nvidia.com>"
+
+      RUN NVIDIA_GPGKEY_SUM=afbea87d3b979b3788ef34223aeeb323ade481128e2c133723ae99b8a51368bb && \
+          curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/rhel10/${NVARCH}/CDF6BA43.pub | sed '/^Version/d' > /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA && \
+          echo "$NVIDIA_GPGKEY_SUM  /etc/pki/rpm-gpg/RPM-GPG-KEY-NVIDIA" | sha256sum -c --strict -
+
+      ENV CUDA_VERSION=13.0.2
+
+      RUN ${PKG_CMD} install -y \
+          cuda-cudart-13-0 \
+          cuda-compat-13-0 \
+          && ${PKG_CMD} clean all \
+          && rm -rf /var/cache/yum/*
+
+      RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/nvidia.conf
+
+      ENV PATH=/usr/local/cuda/bin:${PATH}
+      ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+
+      ADD https://gitlab.com/nvidia/container-images/cuda/-/raw/master/NGC-DL-CONTAINER-LICENSE /NGC-DL-CONTAINER-LICENSE
+
+      ENV NVIDIA_VISIBLE_DEVICES=all
+      ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    configMaps:
+      - configMap:
+          name: cuda-repo
+        destinationDir: .
   triggers:
     - type: ConfigChange
   runPolicy: Serial
@@ -361,8 +367,6 @@ spec:
           value: 6.12.0-142.el10.x86_64
         - name: KERNEL_VERSION_NOARCH
           value: 6.12.0-142.el10
-        - name: RHEL_VERSION
-          value: 10.0.20251023-0
         - name: RHEL_VERSION_MAJOR
           value: '10'
         - name: BUILD_ARCH
@@ -377,184 +381,191 @@ spec:
           value: Jean-Gabriel Gill-Couture
         - name: BUILDER_EMAIL
           value: jg@nationtech.io
-        - name: DRIVER_STREAM_TYPE
-          value: stable
         - name: CUDA_VERSION
-          value: 13.0.1
+          value: 13.0.2
   postCommit: {}
   source:
     type: Git
     dockerfile: |
-      # This dockerfile is adapted from https://github.com/NVIDIA/gpu-driver-container/blob/main/rhel10/precompiled/Dockerfile
-
       ARG DRIVER_TOOLKIT_IMAGE=''
       ARG CUDA_DIST=''
 
+      # Stage 1: Get pre-built kernel packages
       FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/kernel:latest as kernel
 
-      RUN cat /etc/os-release && dnf repolist
-
-      RUN find /root/rpmbuild/RPMS && ls -ltrh /root/rpmbuild && env
-
+      # Stage 2: Build NVIDIA kernel modules
       FROM ${DRIVER_TOOLKIT_IMAGE} as builder
 
-      RUN cat /etc/os-release && dnf repolist
-
       ARG BASE_URL='https://us.download.nvidia.com/tesla'
-
       ARG KERNEL_VERSION=''
-      ARG RHEL_VERSION=''
       ARG RHEL_VERSION_MAJOR=''
-
       ARG BUILD_ARCH=''
       ARG TARGET_ARCH=''
-
       ARG DRIVER_VERSION=''
       ARG DRIVER_EPOCH=''
-      ARG DRIVER_OPEN='true'
-      ARG DRIVER_PATH='kernel'
-
       ARG BUILDER_USER=''
       ARG BUILDER_EMAIL=''
-      ARG DRIVER_STREAM_TYPE=''
 
+      # Create builder user and setup RPM build environment first
       RUN useradd -u 1001 -m -s /bin/bash builder
 
-
-      COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-headers-${KERNEL_VERSION}.rpm\
-        /root/rpmbuild/RPMS/x86_64/kernel-devel-${KERNEL_VERSION}.rpm \
-        /root/rpmbuild/RPMS/x86_64/kernel-devel-matched-${KERNEL_VERSION}.rpm \
-        /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm \
-        /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm \
-        /tmp/
-      RUN dnf install -y /tmp/kernel-*.x86_64.rpm && dnf clean all
-
       USER builder
-
       WORKDIR /home/builder
+
+      # Setup RPM build environment
+      RUN rpmdev-setuptree
+
+      # Switch back to root for package installation
+      USER root
+
+      # Install kernel packages from kernel build stage
+      COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-headers-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-devel-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-devel-matched-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm \
+                         /tmp/
+
+      RUN dnf install -y /tmp/kernel-*.rpm && dnf clean all
+
+      # Verify kernel-devel installation
+      RUN ls -la /usr/src/kernels/${KERNEL_VERSION}/ && \
+          test -f /usr/src/kernels/${KERNEL_VERSION}/scripts/module.lds || \
+          test -f /usr/src/kernels/${KERNEL_VERSION}/scripts/module-common.lds
+
+      # Switch back to builder user
+      USER builder
+      WORKDIR /home/builder
+
+      # Copy x509 configuration for module signing
       COPY --chown=1001:0 x509-configuration.ini x509-configuration.ini
 
-      RUN export KVER=$(echo ${KERNEL_VERSION} | cut -d '-' -f 1) \
-              KREL=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/\.el.*$//') \
-              KDIST=$(echo ${KERNEL_VERSION} | sed -E 's/.*(\.el[0-9]+).*/\1/') \
-              DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
-          && if [ "${DRIVER_OPEN}" == "true" ] ; then export DRIVER_PATH="${DRIVER_PATH}-open" ; fi \
-          && git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} https://github.com/jggc/yum-packaging-precompiled-kmod \
-          && cd yum-packaging-precompiled-kmod \
-          && mkdir BUILD BUILDROOT RPMS SRPMS SOURCES SPECS \
-          && mkdir nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH} \
-          && curl -sLOf ${BASE_URL}/${DRIVER_VERSION}/NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run \
-          && sh ./NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run --extract-only --target tmp \
-          && if [ "${DRIVER_STREAM_TYPE}" == "development" ] ; then \
-              export DRIVER_OPEN='true' ; \
-              git clone --depth 1 --single-branch -b ${DRIVER_VERSION} https://github.com/NVIDIA/open-gpu-kernel-modules ; \
-              mv open-gpu-kernel-modules/${DRIVER_PATH} nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH}/kernel ; \
-          else \
-              mv tmp/${DRIVER_PATH} nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH}/kernel ; \
-          fi \
-          && tar -cJf SOURCES/nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH}.tar.xz nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH} \
-          && mv kmod-nvidia.spec SPECS/ \
-          && sed -i -e "s/\$USER/${BUILDER_USER}/" -e "s/\$EMAIL/${BUILDER_EMAIL}/" ${HOME}/x509-configuration.ini \
-          && openssl req -x509 -new -nodes -utf8 -sha256 -days 36500 -batch \
-            -config ${HOME}/x509-configuration.ini \
-            -outform DER -out SOURCES/public_key.der \
-            -keyout SOURCES/private_key.priv \
-          && rpmbuild \
-              --define "% _arch ${BUILD_ARCH}" \
-              --define "%_topdir $(pwd)" \
-              --define "debug_package %{nil}" \
-              --define "kernel ${KVER}" \
-              --define "kernel_release ${KREL}" \
-              --define "kernel_dist ${KDIST}" \
-              --define "driver ${DRIVER_VERSION}" \
-              --define "epoch ${DRIVER_EPOCH}" \
-              --define "driver_branch ${DRIVER_STREAM}" \
-              -v -bb SPECS/kmod-nvidia.spec
+      # Extract kernel version components
+      RUN export KVER=$(echo ${KERNEL_VERSION} | cut -d '-' -f 1) && \
+          export KREL=$(echo ${KERNEL_VERSION} | cut -d '-' -f 2 | sed 's/\.el.*$//') && \
+          export KDIST=$(echo ${KERNEL_VERSION} | sed -E 's/.*(\.el[0-9]+).*/\1/') && \
+          export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) && \
+          echo "KVER=${KVER}" > /tmp/kver.env && \
+          echo "KREL=${KREL}" >> /tmp/kver.env && \
+          echo "KDIST=${KDIST}" >> /tmp/kver.env && \
+          echo "DRIVER_STREAM=${DRIVER_STREAM}" >> /tmp/kver.env
 
+      # Clone precompiled kmod packaging repo
+      RUN git clone --depth 1 --single-branch -b rhel${RHEL_VERSION_MAJOR} \
+          https://github.com/jggc/yum-packaging-precompiled-kmod
+
+      WORKDIR /home/builder/yum-packaging-precompiled-kmod
+
+      # Download and extract NVIDIA driver
+      RUN . /tmp/kver.env && \
+          curl -sLOf ${BASE_URL}/${DRIVER_VERSION}/NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run && \
+          sh ./NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run --extract-only --target tmp && \
+          mkdir -p nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH} && \
+          mv tmp/kernel nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH}/ && \
+          tar -cJf ~/rpmbuild/SOURCES/nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH}.tar.xz nvidia-kmod-${DRIVER_VERSION}-${BUILD_ARCH}
+
+      # Move spec file and generate signing keys
+      RUN mv kmod-nvidia.spec ~/rpmbuild/SPECS/ && \
+          sed -i -e "s/\$USER/${BUILDER_USER}/" -e "s/\$EMAIL/${BUILDER_EMAIL}/" ${HOME}/x509-configuration.ini && \
+          openssl req -x509 -new -nodes -utf8 -sha256 -days 36500 -batch \
+            -config ${HOME}/x509-configuration.ini \
+            -outform DER -out ~/rpmbuild/SOURCES/public_key.der \
+            -keyout ~/rpmbuild/SOURCES/private_key.priv
+
+      # Build kernel module RPMs using kernel-devel from installed package
+      RUN . /tmp/kver.env && \
+          rpmbuild \
+            --define "_arch ${BUILD_ARCH}" \
+            --define "debug_package %{nil}" \
+            --define "kernel ${KVER}" \
+            --define "kernel_release ${KREL}" \
+            --define "kernel_dist ${KDIST}" \
+            --define "driver ${DRIVER_VERSION}" \
+            --define "epoch ${DRIVER_EPOCH}" \
+            --define "driver_branch ${DRIVER_STREAM}" \
+            -v -bb ~/rpmbuild/SPECS/kmod-nvidia.spec
+
+      # Stage 3: Final runtime image
       FROM image-registry.openshift-image-registry.svc:5000/nvidia-gpu-operator/cuda:13.0-base-${CUDA_DIST}
 
-      RUN cat /etc/os-release && dnf repolist && ls -lh /usr/sbin/
-
       ARG BASE_URL='https://us.download.nvidia.com/tesla'
-
       ARG KERNEL_VERSION=''
       ARG KERNEL_VERSION_NOARCH=''
-      ARG RHEL_VERSION=''
-
-      ARG DRIVER_STREAM_TYPE=''
+      ARG DRIVER_VERSION=''
+      ARG CUDA_VERSION=''
+      ARG BUILD_ARCH=''
+      ARG TARGET_ARCH=''
 
       ARG DRIVER_TYPE=passthrough
       ENV DRIVER_TYPE=${DRIVER_TYPE}
-
-      ARG DRIVER_VERSION=''
       ENV DRIVER_VERSION=${DRIVER_VERSION}
-
-      ARG CUDA_VERSION=''
       ENV CUDA_VERSION=${CUDA_VERSION}
-
-      ARG BUILD_ARCH=''
-      ARG TARGET_ARCH=''
       ENV TARGETARCH=${TARGET_ARCH}
-
       ENV SMDEV_CONTAINER_OFF=1
+
       ARG DISABLE_VGPU_VERSION_CHECK=true
       ENV DISABLE_VGPU_VERSION_CHECK=$DISABLE_VGPU_VERSION_CHECK
 
       USER root
 
-      # Install dummy egl package to workaround bug in cuda repo for package nvidia-driver-libs where egl libraries are required but no longer exist in rhel10 based systems https://github.com/NVIDIA/yum-packaging-nvidia-driver/issues/12
+      # Install dummy EGL package to workaround RHEL10 missing EGL libraries
       ADD dummy-egl.sh /root/dummy-egl.sh
       RUN chmod +x /root/dummy-egl.sh && /root/dummy-egl.sh
 
+      RUN dnf install kmod -y && dnf clean all
 
+      # Copy driver scripts
       COPY --chmod=744 nvidia-driver /usr/local/bin
       COPY --chmod=744 common.sh /usr/local/bin
-      COPY --from=builder /home/builder/yum-packaging-precompiled-kmod/RPMS/${TARGET_ARCH}/*.rpm /rpms/
+
+      # Copy built kernel module RPMs
+      COPY --from=builder /home/builder/rpmbuild/RPMS/${TARGET_ARCH}/*.rpm /rpms/
+
+      # Copy firmware files
       COPY --from=builder --chmod=444 /home/builder/yum-packaging-precompiled-kmod/tmp/firmware/*.bin /opt/lib/firmware/nvidia/${DRIVER_VERSION}/
 
-      RUN rm -rf /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH} \
-          && mkdir -p /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/proc \
-          && touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.order \
-          && touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.builtin \
-          && depmod ${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}
+      # Setup minimal module directory structure for depmod
+      RUN rm -rf /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH} && \
+          mkdir -p /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/proc && \
+          touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.order && \
+          touch /lib/modules/${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}/modules.builtin && \
+          depmod ${KERNEL_VERSION_NOARCH}.${BUILD_ARCH}
 
-      COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm /tmp/
+      # Copy kernel packages (needed for depmod and module loading)
+      COPY --from=kernel /root/rpmbuild/RPMS/x86_64/kernel-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-modules-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-modules-core-${KERNEL_VERSION}.rpm \
+                         /root/rpmbuild/RPMS/x86_64/kernel-core-${KERNEL_VERSION}.rpm \
+                         /tmp/
 
-      RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint https://raw.githubusercontent.com/jggc/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && chmod +x /usr/local/bin/ocp_dtk_entrypoint
+      # Copy OCP DTK entrypoint
+      RUN curl -Lo /usr/local/bin/ocp_dtk_entrypoint \
+          https://raw.githubusercontent.com/jggc/gpu-driver-container/refs/heads/main/rhel10/ocp_dtk_entrypoint && \
+          chmod +x /usr/local/bin/ocp_dtk_entrypoint
 
+      # Install NVIDIA driver components
+      RUN export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) && \
+          CUDA_VERSION_ARRAY=(${CUDA_VERSION//./ }) && \
+          CUDA_DASHED_VERSION=${CUDA_VERSION_ARRAY[0]}-${CUDA_VERSION_ARRAY[1]} && \
+          echo "INFO: Installing precompiled kernel modules and driver components" && \
+          dnf install -y \
+            /rpms/kmod-nvidia-*.rpm \
+            mesa-libEGL \
+            mesa-libgbm \
+            libwayland-egl \
+            egl-utils \
+            nvidia-driver-cuda-${DRIVER_VERSION} \
+            nvidia-driver-libs-${DRIVER_VERSION} \
+            nvidia-persistenced-${DRIVER_VERSION} && \
+          if [ "$DRIVER_TYPE" != "vgpu" ] && [ "$TARGETARCH" != "arm64" ]; then \
+            echo "INFO: Installing Fabric Manager components" && \
+            dnf install -y \
+              nvidia-fabricmanager-${DRIVER_VERSION} \
+              libnvidia-nscq-${DRIVER_VERSION} || true; \
+          fi && \
+          dnf clean all
 
-      RUN    export DRIVER_STREAM=$(echo ${DRIVER_VERSION} | cut -d '.' -f 1) \
-          && if [ "${DRIVER_STREAM_TYPE}" == "development" ] ; then \
-              curl -sLOf ${BASE_URL}/${DRIVER_VERSION}/NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run \
-              sh ./NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run \
-                  --silent \
-                  --accept-license \
-                  --no-kernel-modules \
-                  --no-nvidia-modprobe \
-                  --no-rebuild-initramfs \
-              && rm NVIDIA-Linux-${TARGET_ARCH}-${DRIVER_VERSION}.run ; \
-          else \
-              CUDA_VERSION_ARRAY=(${CUDA_VERSION//./ }) && CUDA_DASHED_VERSION=${CUDA_VERSION_ARRAY[0]}-${CUDA_VERSION_ARRAY[1]} \
-              && echo "INFO: Installing local kmod, system graphics libs, and user-space driver components." \
-              && dnf install -y \
-                  /rpms/kmod-nvidia-*.rpm \
-                  mesa-libEGL \
-                  mesa-libgbm \
-                  libwayland-egl \
-                  egl-utils \
-                  nvidia-driver-cuda-${DRIVER_VERSION} \
-                  nvidia-driver-libs-${DRIVER_VERSION} \
-                  nvidia-persistenced-${DRIVER_VERSION} \
-              && if [ "$DRIVER_TYPE" != "vgpu" ] && [ "$TARGETARCH" != "arm64" ]; then \
-                  versionArray=(${DRIVER_VERSION//./ }); \
-                  DRIVER_BRANCH=${versionArray[0]}; \
-                  echo "INFO: Installing Fabric Manager components." \
-                  && echo "dnf install -y nvidia-fabricmanager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_BRANCH}-${DRIVER_VERSION} ;" \
-                  && dnf install -y nvidia-fabricmanager-${DRIVER_VERSION} libnvidia-nscq-${DRIVER_VERSION} ; \
-              fi \
-              && dnf clean all; \
-          fi
-
+      # Labels
       LABEL io.k8s.display-name="NVIDIA Driver Container"
       LABEL name="NVIDIA Driver Container"
       LABEL vendor="NVIDIA"
@@ -563,9 +574,12 @@ spec:
       LABEL summary="Provision the NVIDIA driver through containers"
       LABEL description="See summary"
 
-      RUN mkdir /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
+      # Licensing
+      RUN mkdir -p /licenses && mv /NGC-DL-CONTAINER-LICENSE /licenses/NGC-DL-CONTAINER-LICENSE
+
+      # Cleanup
       RUN rm -f /etc/yum.repos.d/cuda.repo
-      RUN ls /opt/lib/firmware/nvidia/ && ls /opt/lib/firmware/nvidia/${DRIVER_VERSION}/
+
       ENTRYPOINT ["nvidia-driver", "init"]
     configMaps:
       - configMap:
